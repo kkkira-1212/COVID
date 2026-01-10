@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from sklearn.metrics import f1_score
+from sklearn.metrics import roc_auc_score
 from .trainer import to_device
 from utils.utils import compute_kl_divergence
 
@@ -136,15 +136,8 @@ def train_aerca_forecast(
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     mse = nn.MSELoss()
 
-    best_f1 = 0.0
+    best_roc_auc = 0.0
     patience = 0
-
-    def eval_f1(residuals, labels, idx_val):
-        res_val = residuals[idx_val].detach().cpu().numpy()
-        y_val = labels[idx_val].detach().cpu().numpy()
-        ths = np.linspace(np.percentile(res_val, 10), np.percentile(res_val, 95), 25)
-        f1s = [f1_score(y_val, (res_val >= t).astype(int), zero_division=0) for t in ths]
-        return max(f1s) if len(f1s) else 0.0
 
     for ep in range(epochs):
         model.train()
@@ -176,10 +169,15 @@ def train_aerca_forecast(
             nexts_hat_all, _, _, _, _, _ = model(Xw)
             pred_all = model.proj(nexts_hat_all).squeeze(1)
             residuals = (y_reg - pred_all).abs()
-            f1 = eval_f1(residuals, y_cls, idx_val)
+            res_val = residuals[idx_val].detach().cpu().numpy()
+            y_val = y_cls[idx_val].detach().cpu().numpy()
+            if len(np.unique(y_val)) >= 2:
+                roc_auc = roc_auc_score(y_val, res_val)
+            else:
+                roc_auc = 0.0
 
-        if f1 > best_f1:
-            best_f1 = f1
+        if roc_auc > best_roc_auc:
+            best_roc_auc = roc_auc
             patience = 0
             torch.save(
                 {

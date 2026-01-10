@@ -17,7 +17,14 @@ def create_sequences(state_data, feature_cols, window_size=14, stride=1, freq='D
         y = df["outbreak_label"].values 
         dates = pd.to_datetime(df[date_col].values)
 
-        r = df["NewDeaths_return"].values if "NewDeaths_return" in df else np.zeros(len(df))
+        r_cols = ["target_return", "NewDeaths_return", "regression_target"]
+        r = None
+        for col in r_cols:
+            if col in df.columns:
+                r = df[col].values
+                break
+        if r is None:
+            r = np.zeros(len(df))
 
         base_date = dates[0]
         T = len(df)
@@ -38,6 +45,7 @@ def create_sequences(state_data, feature_cols, window_size=14, stride=1, freq='D
                 "return_next": float(r[t]),
                 "target_time_id": int(target_time_id),
                 "target_date": dates[t],
+                "X_next": X[t],
             })
 
     return sequences, states_order
@@ -64,6 +72,7 @@ def split_sequences(seqs, train_ratio=0.7, val_ratio=0.1):
 def sequences_to_bundle(seqs, idx_tr, idx_v, idx_te, states, feats, win):
     N = len(seqs); D = len(feats)
     X = np.zeros((N, win, D), np.float32)
+    Xn = np.zeros((N, D), np.float32)
     sid = np.zeros(N, np.int64)
     tids = np.zeros((N, win), np.int64)
     tidt = np.zeros(N, np.int64)
@@ -72,6 +81,7 @@ def sequences_to_bundle(seqs, idx_tr, idx_v, idx_te, states, feats, win):
     meta = []
     for i, s in enumerate(seqs):
         X[i] = s['X_seq']
+        Xn[i] = s['X_next']
         sid[i] = s['state_id']
         tids[i] = s['seq_time_ids']
         tidt[i] = s['target_time_id']
@@ -85,6 +95,7 @@ def sequences_to_bundle(seqs, idx_tr, idx_v, idx_te, states, feats, win):
         })
     return {
         'X_seq': torch.tensor(X, dtype=torch.float32),
+        'X_next': torch.tensor(Xn, dtype=torch.float32),
         'state_ids': torch.tensor(sid),
         'seq_time_ids': torch.tensor(tids),
         'target_time_ids': torch.tensor(tidt),
@@ -103,12 +114,32 @@ def standardize(bundle):
     X = bundle['X_seq'].numpy()
     idx = bundle['idx_train'].numpy()
     N, T, D = X.shape
+    
+    if len(idx) == 0:
+        raise ValueError("Training indices are empty. Cannot compute standardization statistics.")
+    
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    
     Xtr = X[idx].reshape(-1, D)
+    Xtr = np.nan_to_num(Xtr, nan=0.0, posinf=0.0, neginf=0.0)
+    
     mean = Xtr.mean(axis=0)
     std = Xtr.std(axis=0)
     std[std < 1e-8] = 1.0
+    
     X = (X - mean.reshape(1,1,D)) / std.reshape(1,1,D)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
     bundle['X_seq'] = torch.tensor(X, dtype=torch.float32)
+    
+    if 'X_next' in bundle:
+        Xn = bundle['X_next'].numpy()
+        if Xn.shape != (N, D):
+            raise ValueError(f"X_next shape mismatch: expected ({N}, {D}), got {Xn.shape}")
+        Xn = np.nan_to_num(Xn, nan=0.0, posinf=0.0, neginf=0.0)
+        Xn = (Xn - mean.reshape(1,D)) / std.reshape(1,D)
+        Xn = np.nan_to_num(Xn, nan=0.0, posinf=0.0, neginf=0.0)
+        bundle['X_next'] = torch.tensor(Xn, dtype=torch.float32)
+    
     bundle['feature_means'] = mean
     bundle['feature_stds'] = std
     return bundle

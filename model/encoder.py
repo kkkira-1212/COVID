@@ -19,7 +19,7 @@ class TransformerSeqEncoder(nn.Module):
 
         self.register_buffer(
             'pos_encoding',
-            self._build_pos_encoding(max_seq_len, d_model)
+            self.build_pos_encoding(max_seq_len, d_model)
         )
 
         layer = nn.TransformerEncoderLayer(
@@ -39,7 +39,7 @@ class TransformerSeqEncoder(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def _build_pos_encoding(self, max_len, d_model):
+    def build_pos_encoding(self, max_len, d_model):
         pos = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
         div = torch.exp(torch.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
         pe = torch.zeros(max_len, d_model)
@@ -61,47 +61,27 @@ class TransformerSeqEncoder(nn.Module):
         return self.output_proj(h)
 
 
-class PredictionHeads(nn.Module):
-    def __init__(self, d_in):
+class RegressionHeadWithRelation(nn.Module):
+    def __init__(self, d_in, num_vars):
         super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(d_in, d_in // 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(d_in // 2, 1)
-        )
-        self.regressor = nn.Sequential(
-            nn.Linear(d_in, d_in),
-            nn.ReLU(),
-            nn.Linear(d_in, 1)
-        )
-
-
-    def forward(self, z_day, z_week):
-        logit_day = self.classifier(z_day).squeeze(1)
-        logit_week = self.classifier(z_week).squeeze(1)
-        pred_day = self.regressor(z_day).squeeze(1)
-        pred_week = self.regressor(z_week).squeeze(1)
-        return logit_day, logit_week, pred_day, pred_week
-
-
-class RegressionHead(nn.Module):
-    def __init__(self, d_in):
-        super().__init__()
-        self.regressor_day = nn.Sequential(
+        self.num_vars = num_vars
+        self.var_relation_matrix = nn.Parameter(torch.randn(num_vars, num_vars) * 0.1)
+        self.base_proj_fine = nn.Sequential(
             nn.Linear(d_in, d_in),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(d_in, 1)
+            nn.Linear(d_in, num_vars)
         )
-        self.regressor_week = nn.Sequential(
+        self.base_proj_coarse = nn.Sequential(
             nn.Linear(d_in, d_in),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(d_in, 1)
+            nn.Linear(d_in, num_vars)
         )
 
-    def forward(self, z_day, z_week):
-        pred_day = self.regressor_day(z_day).squeeze(1)
-        pred_week = self.regressor_week(z_week).squeeze(1)
-        return pred_day, pred_week
+    def forward(self, z_fine, z_coarse):
+        var_base_fine = self.base_proj_fine(z_fine)
+        var_base_coarse = self.base_proj_coarse(z_coarse)
+        pred_fine = torch.matmul(var_base_fine, self.var_relation_matrix.T)
+        pred_coarse = torch.matmul(var_base_coarse, self.var_relation_matrix.T)
+        return pred_fine, pred_coarse

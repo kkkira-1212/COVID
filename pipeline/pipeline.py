@@ -3,8 +3,8 @@ from utils.data_utils import loader, engineer_features, group_by_state, agg_map
 from utils.labels import create_outbreak_labels
 from utils.sequences import create_sequences, split_sequences, sequences_to_bundle, standardize
 from utils.mapping import add_mapping
-from model.trainer import train_ours as train_with_lu
-from model.evaluator import run_inference, evaluate_supervised, evaluate_2b, evaluate_residual_scores,tune_strength
+from model.trainer import train as train_with_lu
+from model.evaluator import infer, evaluate
 from model.patchtst import train_patchtst_forecast, inference_patchtst
 from model.dlinear import train_dlinear_forecast, inference_dlinear
 from model.lstm import train_lstm_forecast, inference_lstm
@@ -15,7 +15,7 @@ DEFAULT_FEATURES = [
     'Cases_GrowthRate', 'NewDeaths_return',
     'Patience_Count',
     'Vax_AllDoses', 'Vax_Dose1', 'Vax_Dose2',
-    'Vax_Dose3', 'Vax_Dose4',
+    'Vax_Dose3',
     'Hosp_Count', 'Hosp_Deaths',
     'Ct_Value', 'Stringency_Index',
     'Aver_Hosp_Stay',
@@ -169,47 +169,8 @@ class COVIDPipeline:
             self.build_dataset()
 
         if self.model_name == "lu":
-            results = run_inference(model_path, self.bundle_day, self.bundle_week, device)
-
-            eval_results = {}
-
-            eval_day = evaluate_supervised(
-                results["p_day"],
-                results["y_day"],
-                results["idx_val_day"],
-                results["idx_test_day"],
-            )
-            eval_results["day"] = eval_day
-
-            eval_week = evaluate_supervised(
-                results["p_week"],
-                results["y_week"],
-                results["idx_val_week"],
-                results["idx_test_week"],
-            )
-            eval_results["week"] = eval_week
-
-            if use_2b:
-                strength = tune_strength(
-                    results["p_day"],
-                    results["res_day"],
-                    results["y_day"],
-                    results["idx_val_day"],
-                )
-                eval_2b = evaluate_2b(
-                    results["p_day"],
-                    results["res_day"],
-                    strength,
-                    results["y_day"],
-                    results["idx_val_day"],
-                    results["idx_test_day"],
-                )
-                eval_results["day_2b"] = eval_2b
-                eval_results["strength"] = strength
-
-            return eval_results, results
-
-        if self.model_name == "patchtst":
+            out = infer(model_path, self.bundle_week, self.bundle_day, device)
+        elif self.model_name == "patchtst":
             out = inference_patchtst(model_path, self.bundle_week, device)
         elif self.model_name == "dlinear":
             out = inference_dlinear(model_path, self.bundle_week, device)
@@ -218,7 +179,7 @@ class COVIDPipeline:
         else:
             raise ValueError(f"Unknown model_name for evaluation: {self.model_name}")
 
-        metrics = evaluate_residual_scores(
+        metrics = evaluate(
             out["residual"],
             out["y_true"],
             out["idx_val"],

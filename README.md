@@ -1,13 +1,14 @@
-# COVID-19 Anomaly Detection
+# Multi-Scale Time Series Anomaly Detection
 
-Multi-scale time series anomaly detection for COVID-19 outbreak prediction using daily and weekly temporal patterns.
+Multi-scale time series anomaly detection framework supporting COVID-19 outbreak prediction and PSM anomaly detection.
 
 ## Features
 
-- **Multi-scale architecture**: Leverages both daily and weekly time series data
-- **L_u constraint loss**: Aligns residuals between daily and weekly predictions
+- **Multi-scale architecture**: Leverages fine and coarse temporal scales (e.g., daily/weekly for COVID-19, fine/coarse aggregation for PSM)
+- **L_u constraint loss**: Aligns residuals between fine and coarse scale predictions
 - **Comprehensive baselines**: PatchTST, DLinear, LSTM, AERCA
 - **Ablation studies**: Systematic evaluation of design components
+- **PSM dataset support**: Fine/coarse scale processing with explicit mapping (coarse_t ↔ fine_[t*k : (t+1)*k])
 
 ## Project Structure
 
@@ -33,12 +34,26 @@ pip install -r requirements.txt
    - Processed data files should be in `data/processed/`
 
 3. Run experiments:
+
+### COVID-19 Dataset:
 ```bash
 # Ablation study on 6-feature dataset
 bash scripts/run_ablation.sh 6feat all
 
 # Run baseline models
 python scripts/run_baselines.py --data_path data/processed/week_21feat.pt --models baselines
+```
+
+### PSM Dataset:
+```bash
+# Process PSM data into fine/coarse scales
+python scripts/process_psm.py --data_dir data/PSM/PSM --output_dir data/PSM/processed --k 5
+
+# Train coarse-only baseline (sanity check)
+python scripts/train_psm_stage1.py --data_dir data/PSM/processed --epochs 50 --batch_size 64
+
+# Train multi-scale model
+python scripts/train_psm_multiscale.py --data_dir data/PSM/processed --epochs 50 --batch_size 64 --use_lu --lambda_u 1.0
 ```
 
 ## Results
@@ -50,8 +65,18 @@ Experimental results are documented in `notebooks/results.ipynb`, including:
 
 ## Data & Models
 
-- **Data files** are not included due to size constraints (>400MB). Please prepare data separately.
+- **Data files** are not included due to size constraints. Please prepare data separately:
+  - COVID-19: Place Excel files in `data/` directory
+  - PSM: Place CSV files (`train.csv`, `test.csv`, `test_label.csv`) in `data/PSM/PSM/`
 - **Trained models** are not included. Models can be trained using the provided scripts.
+- **Processed data** (`.pt` files) are excluded from git but can be generated using processing scripts.
+
+## PSM Dataset Details
+
+- **Fine scale**: Original sequences (1-step, e.g., per minute)
+- **Coarse scale**: Aggregated sequences (k fine steps → 1 coarse step, default k=5)
+- **Mapping**: `coarse_t ↔ fine_[t*k : (t+1)*k]` (explicit index mapping)
+- Processing script: `scripts/process_psm.py`
 
 ## Citation
 

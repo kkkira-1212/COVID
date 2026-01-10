@@ -43,3 +43,12 @@ logs/
 *.temp
 .cache/
 
+# Generated output files (temporary)
+*.png
+!graph/*.png  # Keep graph folder images but ignore root-level generated images
+sequences_*.pt
+
+# Temporary test files
+*_test.pt
+*_test.py
+

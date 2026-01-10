@@ -11,8 +11,8 @@ from model.patchtst import train_patchtst_forecast, inference_patchtst
 from model.dlinear import train_dlinear_forecast, inference_dlinear
 from model.lstm import train_lstm_forecast, inference_lstm
 from model.AERCA import train_aerca_forecast, inference_aerca
-from model.trainer import train_ours
-from model.evaluator import evaluate_residual_scores, run_inference
+from model.trainer import train
+from model.evaluator import evaluate, infer
 
 
 def load_bundle_week(pt_path):
@@ -28,13 +28,17 @@ def load_bundle_week(pt_path):
         'seq_time_ids': data.get('seq_time_ids', None),
         'target_time_ids': data.get('target_time_ids', None),
     }
+    if 'X_next' in data:
+        bundle_week['X_next'] = data['X_next']
     if 'seq_meta' in data:
         bundle_week['meta'] = data['seq_meta']
     if 'states_order' in data:
         bundle_week['states_order'] = data['states_order']
     if 'window_size' in data:
         bundle_week['window_size'] = data['window_size']
-    if 'num_features' in data:
+    if 'feature_cols' in data:
+        bundle_week['feature_cols'] = data['feature_cols']
+    elif 'num_features' in data:
         bundle_week['feature_cols'] = [f'feature_{i}' for i in range(data['num_features'])]
     print(f"Loaded bundle_week: {len(bundle_week['X_seq'])} sequences")
     print(f"  X_seq shape: {bundle_week['X_seq'].shape}")
@@ -52,7 +56,12 @@ def load_bundle_day(pt_path):
         'idx_val': data['idx_val'],
         'idx_test': data['idx_test'],
         'day_to_week_index': data.get('day_to_week_index', None),
+        'fine_to_coarse_index': data.get('fine_to_coarse_index', None),
     }
+    if 'X_next' in data:
+        bundle_day['X_next'] = data['X_next']
+    if 'feature_cols' in data:
+        bundle_day['feature_cols'] = data['feature_cols']
     print(f"Loaded bundle_day: {len(bundle_day['X_seq'])} sequences")
     print(f"  X_seq shape: {bundle_day['X_seq'].shape}")
     print(f"  Train: {len(bundle_day['idx_train'])}, Val: {len(bundle_day['idx_val'])}, Test: {len(bundle_day['idx_test'])}")
@@ -60,7 +69,7 @@ def load_bundle_day(pt_path):
 
 
 def train_and_evaluate(model_name, bundle_week, bundle_day=None, save_dir="models/baselines",
-                       epochs=200, lambda_u=1.0, alpha_cls=1.0, alpha_reg=0.1,
+                       epochs=200, lambda_u=1.0,
                        use_postprocessing=False, device='cuda', use_lu=None):
     os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, f"{model_name}.pt")
@@ -95,37 +104,27 @@ def train_and_evaluate(model_name, bundle_week, bundle_day=None, save_dir="model
         )
     elif model_name.startswith("ours_"):
         if model_name == "ours_weekonly":
-            train_ours(
-                bundle_week=bundle_week, bundle_day=None, save_path=model_path,
-                weekly_only=True, use_classification=False, use_lu=False,
+            train(
+                bundle_coarse=bundle_week, bundle_fine=None, save_path=model_path,
+                coarse_only=True, use_lu=False,
                 epochs=epochs, lr=3e-4, weight_decay=1e-4, patience_limit=30,
             )
         elif model_name == "ours_multiscale":
             if bundle_day is None:
                 raise ValueError("bundle_day required for ours_multiscale")
-            # Default to True if not explicitly set
             use_lu_flag = use_lu if use_lu is not None else True
-            train_ours(
-                bundle_week=bundle_week, bundle_day=bundle_day, save_path=model_path,
-                weekly_only=False, use_classification=False, use_lu=use_lu_flag, lambda_u=lambda_u,
+            train(
+                bundle_coarse=bundle_week, bundle_fine=bundle_day, save_path=model_path,
+                coarse_only=False, use_lu=use_lu_flag, lambda_u=lambda_u,
                 epochs=epochs, lr=3e-4, weight_decay=1e-4, patience_limit=30,
             )
         elif model_name == "ours_multiscale_no_lu":
             if bundle_day is None:
                 raise ValueError("bundle_day required for ours_multiscale_no_lu")
-            train_ours(
-                bundle_week=bundle_week, bundle_day=bundle_day, save_path=model_path,
-                weekly_only=False, use_classification=False, use_lu=False, lambda_u=0.0,
+            train(
+                bundle_coarse=bundle_week, bundle_fine=bundle_day, save_path=model_path,
+                coarse_only=False, use_lu=False, lambda_u=0.0,
                 epochs=epochs, lr=3e-4, weight_decay=1e-4, patience_limit=30,
-            )
-        elif model_name == "ours_supervised":
-            if bundle_day is None:
-                raise ValueError("bundle_day required for ours_supervised")
-            train_ours(
-                bundle_week=bundle_week, bundle_day=bundle_day, save_path=model_path,
-                weekly_only=False, use_classification=True, use_lu=True,
-                alpha_cls=alpha_cls, alpha_reg=alpha_reg, lambda_u=lambda_u,
-                epochs=epochs, lr=3e-4, weight_decay=1e-4, patience_limit=40,
             )
         else:
             raise ValueError(f"Unknown ours model: {model_name}")
@@ -144,13 +143,13 @@ def train_and_evaluate(model_name, bundle_week, bundle_day=None, save_dir="model
     elif model_name == "aerca":
         results = inference_aerca(model_path, bundle_week, device)
     elif model_name.startswith("ours_"):
-        results = run_inference(
+        results = infer(
             model_path, bundle_week, bundle_day, device, use_postprocessing
         )
     else:
         raise ValueError(f"Unknown model_name: {model_name}")
     
-    metrics = evaluate_residual_scores(
+    metrics = evaluate(
         results["residual"], results["y_true"],
         results["idx_val"], results["idx_test"],
     )
@@ -174,8 +173,8 @@ def main():
                        help="Directory to save trained models")
     parser.add_argument("--models", type=str, nargs="+",
                        choices=["patchtst", "dlinear", "lstm", "aerca", "ours_weekonly",
-                               "ours_multiscale", "ours_multiscale_no_lu", "ours_supervised", "all", "baselines",
-                               "track_a_all", "track_b_all"],
+                               "ours_multiscale", "ours_multiscale_no_lu", "all", "baselines",
+                               "track_a_all"],
                        default=["all"],
                        help="Which models to run")
     parser.add_argument("--data_path_day", type=str, default=None,
@@ -184,10 +183,6 @@ def main():
                        help="Weight for L_u loss")
     parser.add_argument("--no_use_lu", action='store_true', default=False,
                        help="Explicitly disable L_u loss for multiscale (default: enabled)")
-    parser.add_argument("--alpha_cls", type=float, default=1.0,
-                       help="Weight for classification loss")
-    parser.add_argument("--alpha_reg", type=float, default=0.1,
-                       help="Weight for regression loss")
     parser.add_argument("--use_postprocessing", action="store_true",
                        help="Use post-processing")
     parser.add_argument("--epochs", type=int, default=200,
@@ -209,18 +204,16 @@ def main():
         bundle_day = load_bundle_day(args.data_path_day)
     
     if "all" in args.models:
-        models_to_run = ["patchtst", "dlinear", "lstm", "aerca", "ours_weekonly", "ours_multiscale", "ours_supervised"]
+        models_to_run = ["patchtst", "dlinear", "lstm", "aerca", "ours_weekonly", "ours_multiscale"]
     elif "baselines" in args.models:
         models_to_run = ["patchtst", "dlinear", "lstm", "aerca"]
     elif "track_a_all" in args.models:
         models_to_run = ["patchtst", "dlinear", "lstm", "ours_weekonly", "ours_multiscale"]
-    elif "track_b_all" in args.models:
-        models_to_run = ["ours_supervised"]
     else:
         models_to_run = args.models
     
     if bundle_day is None:
-        models_need_day = ["ours_multiscale", "ours_multiscale_no_lu", "ours_supervised"]
+        models_need_day = ["ours_multiscale", "ours_multiscale_no_lu"]
         models_to_run = [m for m in models_to_run if m not in models_need_day]
     
     all_results = {}
@@ -229,7 +222,6 @@ def main():
             metrics, results = train_and_evaluate(
                 model_name=model_name, bundle_week=bundle_week, bundle_day=bundle_day,
                 save_dir=args.save_dir, epochs=args.epochs, lambda_u=args.lambda_u,
-                alpha_cls=args.alpha_cls, alpha_reg=args.alpha_reg,
                 use_postprocessing=args.use_postprocessing, device=args.device,
                 use_lu=args.use_lu,
             )
