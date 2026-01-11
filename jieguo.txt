@@ -1,0 +1,213 @@
+PSM · Stage 1 · coarse-only baseline（可信）
+重新采样后 coarse-only的结果训练完成（50 epochs）
+最佳 Val F1: 0.5000 (epoch 43)
+ROC-AUC: 0.7409
+Signal Ratio: 1.29x
+Precision: 0.9792
+Recall: 0.2070
+
+Computing evaluation metrics...
+
+Evaluation Metrics:
+  Threshold: 1.208248
+  F1 Score: 0.3247
+  Precision: 1.0000
+  Recall: 0.1938
+  ROC-AUC: 0.7372
+  AUPRC: 0.6415
+
+Analyzing residual separation quality...
+Residual distribution plot saved to: psm_residual_coarse_only.png
+
+Residual Separation Statistics:
+
+Validation Set:
+  Normal:   n=954, median=0.721877, mean=0.754700, std=0.215113
+  Anomaly:  n=45, median=1.226002, mean=1.465348, std=0.800965
+
+Test Set:
+  Normal:   n=775, median=0.705602, mean=0.713330, std=0.155591
+  Anomaly:  n=227, median=0.970950, mean=0.942013, std=0.277248
+
+Signal Ratio (Anomaly/Normal median): 1.38x
+ROC-AUC: 0.7372
+
+============================================================
+Sanity Check Summary
+============================================================
+✓ Pipeline: OK (data loaded and processed)
+✓ Split: OK (train/val/test split looks reasonable)
+✓ Residual Separation: GOOD (ROC-AUC = 0.7372 > 0.5)
+✓ Signal Ratio: GOOD (1.38x > 1.0x)
+============================================================
+
+
+
+PSM · Stage 1 · multi-scale（明确优于 baseline）
+Computing evaluation metrics...
+
+Evaluation Metrics:
+
+  Threshold: 1.314560
+
+  F1 Score: 0.3123
+
+  Precision: 1.0000
+
+  Recall: 0.1850
+
+  ROC-AUC: 0.7931
+
+  AUPRC: 0.7078
+
+
+
+Signal Ratio (Anomaly/Normal median): 1.50x
+
+ROC-AUC: 0.7931
+
+
+
+============================================================
+
+Multi-Scale Training Summary
+
+============================================================
+
+✓ Pipeline: OK (data loaded and processed)
+
+✓ Split: OK (train/val/test split maintained)
+
+✓ Residual Separation: GOOD (ROC-AUC = 0.7931 > 0.5)
+
+✓ Signal Ratio: GOOD (1.50x > 1.0x)
+
+以下是stage2的验证：
+coarse-only:
+Computing anomaly scores...
+  Using COMBINED MODE: spatial_weight=0.5, temporal_weight=0.5
+Reference computed from 26431 normal training windows
+Reference causal matrix shape: (25, 25)
+Training normal residual stats: median=0.687850, MAD=0.155101
+
+Score statistics (all windows):
+  Mean: 1.302541
+  Std: 0.898732
+  Median: 1.137438
+  Q90: 2.292513
+  Q95: 2.651477
+  Q99: 4.486622
+
+Spatial deviation statistics:
+  Mean: 1.251269
+  Median: 0.620954
+
+Temporal deviation statistics:
+  Mean: 1.353813
+  Median: 1.013529
+
+Evaluating Stage 2...
+
+============================================================
+EVALUATION RESULTS
+============================================================
+
+Threshold (99% percentile of train normal): 4.813789
+
+Test Set Metrics (Combined (Spatial + Temporal)):
+  AUPRC: 0.4141 ✗
+  ROC-AUC: 0.6185 ✓
+  Normal score median: 1.006517
+  Attack score median: 1.434590
+  Effect size (attack/normal): 1.43x ✓
+
+Test Set Deviation Breakdown:
+  Spatial deviation median:
+    Normal: 0.760786
+    Attack: 0.567231
+  Temporal deviation median:
+    Normal: 0.913023
+    Attack: 1.945260
+
+Validation Set (reference):
+  Normal score median: 1.026308
+  Attack score median: 0.777062
+  Effect size (attack/normal): 0.76x
+
+Training Normal Statistics:
+  Median: 1.204263
+  Q99: 4.813789
+
+============================================================
+DECISION CRITERIA
+============================================================
+  AUPRC > 0.5: FAIL (0.4141)
+  ROC-AUC > 0.5: PASS (0.6185)
+  Effect size > 1.2x: PASS (1.43x)
+
+✗ Stage 2 validation FAILED - Consider fixing Stage 1
+============================================================
+
+以下是multi-scale：
+Computing anomaly scores...
+  Using COMBINED MODE: spatial_weight=0.5, temporal_weight=0.5
+Reference computed from 26431 normal training windows
+Reference causal matrix shape: (25, 25)
+Training normal residual stats: median=0.560375, MAD=0.143833
+
+Score statistics (all windows):
+  Mean: 1.583050
+  Std: 0.963206
+  Median: 1.395254
+  Q90: 2.417210
+  Q95: 3.115673
+  Q99: 5.797843
+
+Spatial deviation statistics:
+  Mean: 1.546597
+  Median: 1.221217
+
+Temporal deviation statistics:
+  Mean: 1.619503
+  Median: 1.083507
+
+Evaluating Stage 2...
+
+============================================================
+EVALUATION RESULTS
+============================================================
+
+Threshold (99% percentile of train normal): 6.109545
+
+Test Set Metrics (Combined (Spatial + Temporal)):
+  AUPRC: 0.5323 ✓
+  ROC-AUC: 0.7003 ✓
+  Normal score median: 1.485022
+  Attack score median: 2.130195
+  Effect size (attack/normal): 1.43x ✓
+
+Test Set Deviation Breakdown:
+  Spatial deviation median:
+    Normal: 1.249314
+    Attack: 1.102759
+  Temporal deviation median:
+    Normal: 1.387190
+    Attack: 2.856875
+
+Validation Set (reference):
+  Normal score median: 1.122738
+  Attack score median: 1.323391
+  Effect size (attack/normal): 1.18x
+
+Training Normal Statistics:
+  Median: 1.413073
+  Q99: 6.109545
+
+============================================================
+DECISION CRITERIA
+============================================================
+  AUPRC > 0.5: PASS (0.5323)
+  ROC-AUC > 0.5: PASS (0.7003)
+  Effect size > 1.2x: PASS (1.43x)
+
+✓ Stage 2 validation PASSED - Worth continuing!

@@ -296,21 +296,24 @@ def evaluate_stage2(scores, y_true, idx_train, idx_val, idx_test, train_normal_r
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Stage 2 minimal validation for SWaT')
+    parser = argparse.ArgumentParser(description='Stage 2 minimal validation for SWaT/PSM')
     parser.add_argument('--model_path', type=str, 
                        default='models/swat_stage1_multi_scale.pt',
                        help='Path to Stage 1 trained model')
     parser.add_argument('--data_dir', type=str, 
                        default='data/SWaT/processed',
-                       help='Path to processed SWaT data')
+                       help='Path to processed data directory (SWaT or PSM)')
+    parser.add_argument('--dataset', type=str, default='auto',
+                       choices=['auto', 'swat', 'psm'],
+                       help='Dataset type: auto (detect from data_dir), swat, or psm')
     parser.add_argument('--sparsify_threshold', type=int, default=90,
                        help='Percentile threshold for sparsifying causal matrix')
-    parser.add_argument('--spatial_weight', type=float, default=1.0,
+    parser.add_argument('--spatial_weight', type=float, default=0.5,
                        help='Weight for spatial deviation in anomaly score')
-    parser.add_argument('--temporal_weight', type=float, default=0.0,
-                       help='Weight for temporal deviation in anomaly score (set to 0 to use only spatial)')
+    parser.add_argument('--temporal_weight', type=float, default=0.5,
+                       help='Weight for temporal deviation in anomaly score')
     parser.add_argument('--spatial_only', action='store_true',
-                       help='Use only spatial deviation, ignore temporal')
+                       help='Use only spatial deviation, ignore temporal (overrides temporal_weight)')
     parser.add_argument('--batch_size', type=int, default=32,
                        help='Batch size for inference')
     parser.add_argument('--device', type=str, default='cuda',
@@ -318,34 +321,60 @@ def main():
     
     args = parser.parse_args()
     
+    # Auto-detect dataset type from data_dir if not specified
+    data_dir = Path(args.data_dir)
+    if args.dataset == 'auto':
+        if 'swat' in str(data_dir).lower() or (data_dir / 'swat_hour.pt').exists():
+            dataset_type = 'swat'
+        elif 'psm' in str(data_dir).lower() or (data_dir / 'psm_coarse.pt').exists():
+            dataset_type = 'psm'
+        else:
+            # Try to detect by checking which files exist
+            if (data_dir / 'swat_hour.pt').exists():
+                dataset_type = 'swat'
+            elif (data_dir / 'psm_coarse.pt').exists():
+                dataset_type = 'psm'
+            else:
+                raise ValueError(f"Cannot auto-detect dataset type from {data_dir}. Please specify --dataset explicitly.")
+    else:
+        dataset_type = args.dataset
+    
     print("=" * 60)
     print("Stage 2 Minimal Validation")
     print("=" * 60)
     print(f"\nConfiguration:")
+    print(f"  Dataset: {dataset_type.upper()}")
     print(f"  Model: {args.model_path}")
     print(f"  Data: {args.data_dir}")
     print(f"  Sparsify threshold: {args.sparsify_threshold}%")
-    if args.spatial_only or args.temporal_weight == 0.0:
+    if args.spatial_only:
         print(f"  Mode: SPATIAL ONLY (temporal deviation disabled)")
         print(f"  Spatial weight: 1.0")
         print(f"  Temporal weight: 0.0")
     else:
+        print(f"  Mode: COMBINED (spatial + temporal)")
         print(f"  Spatial weight: {args.spatial_weight}")
         print(f"  Temporal weight: {args.temporal_weight}")
     
-    # Load data
-    data_dir = Path(args.data_dir)
-    bundle_hour = torch.load(data_dir / 'swat_hour.pt', weights_only=False)
+    # Load data based on dataset type
+    if dataset_type == 'swat':
+        bundle_coarse = torch.load(data_dir / 'swat_hour.pt', weights_only=False)
+        scale_name = 'Hour'
+    elif dataset_type == 'psm':
+        bundle_coarse = torch.load(data_dir / 'psm_coarse.pt', weights_only=False)
+        scale_name = 'Coarse'
+    else:
+        raise ValueError(f"Unknown dataset type: {dataset_type}")
     
-    print(f"\nData loaded:")
-    print(f"  Hour scale shape: {bundle_hour['X_seq'].shape}")
-    print(f"  Train/Val/Test sizes: {len(bundle_hour['idx_train'])}/{len(bundle_hour['idx_val'])}/{len(bundle_hour['idx_test'])}")
+    print(f"\nData loaded ({dataset_type.upper()}):")
+    print(f"  {scale_name} scale shape: {bundle_coarse['X_seq'].shape}")
+    print(f"  Train/Val/Test sizes: {len(bundle_coarse['idx_train'])}/{len(bundle_coarse['idx_val'])}/{len(bundle_coarse['idx_test'])}")
     
     # Extract causal matrices and residuals
     print(f"\nExtracting causal matrices and residuals...")
     causal_matrices, residuals, y_true, idx_train, idx_val, idx_test, relation_matrix_ref = \
         extract_causal_matrix_and_residual(
-            args.model_path, bundle_hour, device=args.device, batch_size=args.batch_size
+            args.model_path, bundle_coarse, device=args.device, batch_size=args.batch_size
         )
     
     print(f"  Causal matrices shape: {causal_matrices.shape}")
@@ -354,13 +383,14 @@ def main():
     
     # Compute anomaly scores
     print(f"\nComputing anomaly scores...")
-    if args.spatial_only or args.temporal_weight == 0.0:
+    if args.spatial_only:
         spatial_weight = 1.0
         temporal_weight = 0.0
         print(f"  Using SPATIAL DEVIATION ONLY (temporal ignored)")
     else:
         spatial_weight = args.spatial_weight
         temporal_weight = args.temporal_weight
+        print(f"  Using COMBINED MODE: spatial_weight={spatial_weight}, temporal_weight={temporal_weight}")
     
     score_results = compute_anomaly_scores(
         causal_matrices, residuals, y_true,
@@ -404,7 +434,8 @@ def main():
     
     print(f"\nThreshold (99% percentile of train normal): {eval_results['threshold']:.6f}")
     
-    print(f"\nTest Set Metrics (Spatial Deviation Only):")
+    mode_label = "Spatial Only" if args.spatial_only else "Combined (Spatial + Temporal)"
+    print(f"\nTest Set Metrics ({mode_label}):")
     print(f"  AUPRC: {eval_results['test_auprc']:.4f} {'✓' if eval_results['test_auprc'] > 0.5 else '✗'}")
     print(f"  ROC-AUC: {eval_results['test_roc_auc']:.4f} {'✓' if eval_results['test_roc_auc'] > 0.5 else '✗'}")
     print(f"  Normal score median: {eval_results['test_normal_median']:.6f}")
@@ -443,7 +474,7 @@ def main():
     print(f"  Effect size > 1.2x: {'PASS' if passed_effect else 'FAIL'} ({eval_results['test_effect_size']:.2f}x)")
     
     # Decision for spatial-only mode
-    use_spatial_only = args.spatial_only or args.temporal_weight == 0.0
+    use_spatial_only = args.spatial_only
     if use_spatial_only:
         print(f"\n" + "=" * 60)
         print("SPATIAL-ONLY VALIDATION RESULT")
