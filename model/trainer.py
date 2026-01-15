@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from pathlib import Path
 from sklearn.metrics import f1_score, roc_auc_score
 from .encoder import TransformerSeqEncoder, RegressionHeadWithRelation
 
@@ -62,6 +63,12 @@ def train_ours(
             device = torch.device(device)
     elif not isinstance(device, torch.device):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Ensure save directory exists
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path = str(save_path)
     
     if fine_only:
         # Fine-only training: use fine scale data only
