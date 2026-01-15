@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, roc_auc_score
 from .encoder import TransformerSeqEncoder, RegressionHeadWithRelation
 
 
@@ -35,6 +35,7 @@ def train_ours(
     bundle_fine=None,
     save_path=None,
     coarse_only=False,
+    fine_only=False,
     use_classification=False,
     use_lu=False,
     alpha_cls=1.0,
@@ -48,7 +49,8 @@ def train_ours(
     num_layers=2,
     pooling="last",
     batch_size=32,
-    device='cuda'
+    device='cuda',
+    resume_from=None
 ):
     # Handle device parameter: convert string to device or use default
     if isinstance(device, str):
@@ -60,6 +62,177 @@ def train_ours(
             device = torch.device(device)
     elif not isinstance(device, torch.device):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if fine_only:
+        # Fine-only training: use fine scale data only
+        if bundle_fine is None:
+            raise ValueError("bundle_fine required for fine_only training")
+        
+        # Keep data on CPU, move to GPU only when needed for batch processing
+        data = {
+            'X_fine': bundle_fine['X_seq'],  # Keep on CPU
+            'X_next_fine': bundle_fine['X_next'],  # Keep on CPU
+            'y_fine': bundle_fine.get('y_next', None),  # Keep on CPU
+            'idx_tr': bundle_fine['idx_train'],
+            'idx_val': bundle_fine['idx_val'],
+            'idx_test': bundle_fine['idx_test'],
+        }
+        
+        enc_fine = TransformerSeqEncoder(
+            input_dim=data['X_fine'].shape[2], d_model=d_model, nhead=nhead,
+            num_layers=num_layers, max_seq_len=data['X_fine'].shape[1] + 5
+        ).to(device)
+        enc_fine.pooling = pooling
+        
+        num_vars = data['X_fine'].shape[2]
+        head = RegressionHeadWithRelation(d_model, num_vars).to(device)
+        
+        opt = torch.optim.AdamW(
+            list(enc_fine.parameters()) + list(head.parameters()),
+            lr=lr, weight_decay=weight_decay
+        )
+        
+        idx_tr = data['idx_tr']
+        n_train = len(idx_tr)
+        train_batches = []
+        for i in range(0, n_train, batch_size):
+            end_idx = min(i + batch_size, n_train)
+            train_batches.append(idx_tr[i:end_idx])
+        
+        # Track best validation AUC-ROC for model saving
+        best_auc = None
+        best_epoch = 0
+        
+        for ep in range(epochs):
+            enc_fine.train()
+            head.train()
+            opt.zero_grad()
+            
+            # Two-pass gradient accumulation to avoid computation graph accumulation
+            # First pass: count batches
+            n_batches = len(train_batches)
+            
+            # Second pass: compute scaled losses and backward immediately
+            total_loss_scalar = 0.0
+            for batch_idx_idx, batch_idx in enumerate(train_batches):
+                X_fine_batch = data['X_fine'][batch_idx].to(device)
+                X_next_fine_batch = data['X_next_fine'][batch_idx].to(device)
+                
+                z_fine_batch = enc_fine(X_fine_batch)
+                _, pred_fine_batch = head(z_fine_batch, z_fine_batch)
+                pred_fine_batch = pred_fine_batch.mean(dim=1)
+                target_batch = X_next_fine_batch.mean(dim=1)
+                
+                batch_loss = F.mse_loss(pred_fine_batch, target_batch)
+                total_loss_scalar += batch_loss.item()
+                
+                # Scale loss and backward immediately to avoid graph accumulation
+                if n_batches > 0:
+                    scaled_loss = batch_loss / n_batches
+                    is_last_batch = (batch_idx_idx == len(train_batches) - 1)
+                    scaled_loss.backward(retain_graph=not is_last_batch)
+                    del scaled_loss
+                
+                # Clear intermediate tensors
+                del X_fine_batch, X_next_fine_batch, z_fine_batch, pred_fine_batch, target_batch, batch_loss
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+            
+            if n_batches > 0:
+                loss = torch.tensor(total_loss_scalar / n_batches, device=device)
+                torch.nn.utils.clip_grad_norm_(list(enc_fine.parameters()) + list(head.parameters()), 1.0)
+                opt.step()
+            else:
+                loss = torch.tensor(0.0, device=device, requires_grad=True)
+            
+            enc_fine.eval()
+            head.eval()
+            with torch.no_grad():
+                # Compute predictions for validation set in batches
+                idx_val = data['idx_val']
+                pred_val_list = []
+                for i in range(0, len(idx_val), batch_size):
+                    end_idx = min(i + batch_size, len(idx_val))
+                    batch_idx = idx_val[i:end_idx]
+                    X_fine_batch = data['X_fine'][batch_idx].to(device)
+                    X_next_fine_batch = data['X_next_fine'][batch_idx].to(device)
+                    z_fine_batch = enc_fine(X_fine_batch)
+                    _, pred_fine_batch = head(z_fine_batch, z_fine_batch)
+                    pred_val_list.append(pred_fine_batch.mean(dim=1).cpu())
+                
+                if len(pred_val_list) > 0:
+                    pred_fine_val = torch.cat(pred_val_list, dim=0)
+                    X_next_fine_val = data['X_next_fine'][idx_val].mean(dim=1)
+                    residual_fine = (X_next_fine_val - pred_fine_val).abs()
+                    res_val = residual_fine.numpy()
+                    
+                    if data['y_fine'] is not None:
+                        y_val = data['y_fine'][idx_val].numpy() if isinstance(data['y_fine'], torch.Tensor) else data['y_fine'][idx_val]
+                        # Check if validation set has only one class (all normal or all anomaly)
+                        unique_classes = np.unique(y_val)
+                        if len(unique_classes) < 2:
+                            # Skip ROC AUC calculation if only one class present
+                            auc = None
+                        else:
+                            try:
+                                auc = roc_auc_score(y_val, res_val)
+                            except (ValueError, Exception):
+                                auc = None
+                    else:
+                        auc = None
+                else:
+                    auc = None
+                
+                # Track best AUC-ROC (skip if auc is None)
+                if auc is not None and (best_auc is None or auc > best_auc):
+                    best_auc = auc
+                    best_epoch = ep
+            
+            if (ep + 1) % 10 == 0 or ep == epochs - 1:
+                auc_str = f"{auc:.4f}" if auc is not None else "N/A (single class)"
+                print(f"Epoch {ep+1}/{epochs} - Loss: {loss.item():.6f}, Val AUC-ROC: {auc_str}", flush=True)
+            
+            # Save best model and final model
+            # If auc is valid, save when it's the best; always save final epoch
+            if auc is not None and (best_auc is None or auc > best_auc):
+                best_auc = auc
+                best_epoch = ep
+                torch.save({
+                    "epoch": ep,
+                    "enc_fine": enc_fine.state_dict(),
+                    "head": head.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    "config": {
+                        "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
+                        "pooling": pooling, "coarse_only": False, "fine_only": True, "use_classification": False,
+                        "num_vars": num_vars
+                    },
+                    "best_auc": best_auc,
+                    "best_epoch": best_epoch
+                }, save_path)
+            
+            # Always save final epoch (especially when auc is None throughout training)
+            if ep == epochs - 1:
+                # If no valid auc was found, use final epoch as best
+                if best_auc is None:
+                    best_epoch = ep
+                torch.save({
+                    "epoch": ep,
+                    "enc_fine": enc_fine.state_dict(),
+                    "head": head.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    "config": {
+                        "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
+                        "pooling": pooling, "coarse_only": False, "fine_only": True, "use_classification": False,
+                        "num_vars": num_vars
+                    },
+                    "best_auc": best_auc,
+                    "best_epoch": best_epoch
+                }, save_path)
+                best_auc_str = f"{best_auc:.4f}" if best_auc is not None else "N/A (single class in validation)"
+                print(f"\nTraining completed. Best AUC-ROC: {best_auc_str} at epoch {best_epoch+1}. Final model saved at epoch {ep+1}.", flush=True)
+        
+        return save_path
     
     if coarse_only:
         # Keep data on CPU, move to GPU only when needed for batch processing
@@ -93,11 +266,23 @@ def train_ours(
             end_idx = min(i + batch_size, n_train)
             train_batches.append(idx_tr[i:end_idx])
         
-        # Track best validation F1 for model saving
-        best_f1 = 0.0
+        # Resume from checkpoint if provided
+        start_epoch = 0
+        best_auc = None
         best_epoch = 0
+        if resume_from is not None:
+            print(f"\nResuming training from checkpoint: {resume_from}")
+            checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
+            enc_coarse.load_state_dict(checkpoint['enc_coarse'])
+            head.load_state_dict(checkpoint['head'])
+            if 'optimizer' in checkpoint:
+                opt.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_auc = checkpoint.get('best_auc', None)
+            best_epoch = checkpoint.get('best_epoch', 0)
+            print(f"  Resumed from epoch {start_epoch}, best AUC: {best_auc}, best epoch: {best_epoch+1}")
         
-        for ep in range(epochs):
+        for ep in range(start_epoch, epochs):
             enc_coarse.train()
             head.train()
             opt.zero_grad()
@@ -154,38 +339,69 @@ def train_ours(
                     
                     if data['y_coarse'] is not None:
                         y_val = data['y_coarse'][idx_val].numpy() if isinstance(data['y_coarse'], torch.Tensor) else data['y_coarse'][idx_val]
-                        ths = np.linspace(np.percentile(res_val, 10), np.percentile(res_val, 95), 25)
-                        f1s = [f1_score(y_val, (res_val >= t).astype(int), zero_division=0) for t in ths]
-                        f1 = max(f1s) if len(f1s) else 0.0
+                        # Check if validation set has only one class (all normal or all anomaly)
+                        unique_classes = np.unique(y_val)
+                        if len(unique_classes) < 2:
+                            # Skip ROC AUC calculation if only one class present
+                            auc = None
+                        else:
+                            try:
+                                auc = roc_auc_score(y_val, res_val)
+                            except (ValueError, Exception):
+                                auc = None
                     else:
-                        f1 = 0.0
+                        auc = None
                 else:
-                    f1 = 0.0
+                    auc = None
                 
-                # Track best F1
-                if f1 > best_f1:
-                    best_f1 = f1
+                # Track best AUC-ROC (skip if auc is None)
+                if auc is not None and (best_auc is None or auc > best_auc):
+                    best_auc = auc
                     best_epoch = ep
             
             if (ep + 1) % 10 == 0 or ep == epochs - 1:
-                print(f"Epoch {ep+1}/{epochs} - Loss: {loss.item():.6f}, Val F1: {f1:.4f}", flush=True)
+                auc_str = f"{auc:.4f}" if auc is not None else "N/A (single class)"
+                print(f"Epoch {ep+1}/{epochs} - Loss: {loss.item():.6f}, Val AUC-ROC: {auc_str}", flush=True)
             
             # Save best model and final model
-            if f1 > best_f1 or ep == epochs - 1:
+            # If auc is valid, save when it's the best; always save final epoch
+            if auc is not None and (best_auc is None or auc > best_auc):
+                best_auc = auc
+                best_epoch = ep
                 torch.save({
                     "epoch": ep,
                     "enc_coarse": enc_coarse.state_dict(),
                     "head": head.state_dict(),
+                    "optimizer": opt.state_dict(),
                     "config": {
                         "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
                         "pooling": pooling, "coarse_only": True, "use_classification": False,
                         "num_vars": num_vars
                     },
-                    "best_f1": best_f1,
+                    "best_auc": best_auc,
                     "best_epoch": best_epoch
                 }, save_path)
-                if ep == epochs - 1:
-                    print(f"\nTraining completed. Best F1: {best_f1:.4f} at epoch {best_epoch+1}. Final model saved at epoch {ep+1}.", flush=True)
+            
+            # Always save final epoch (especially when auc is None throughout training)
+            if ep == epochs - 1:
+                # If no valid auc was found, use final epoch as best
+                if best_auc is None:
+                    best_epoch = ep
+                torch.save({
+                    "epoch": ep,
+                    "enc_coarse": enc_coarse.state_dict(),
+                    "head": head.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    "config": {
+                        "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
+                        "pooling": pooling, "coarse_only": True, "use_classification": False,
+                        "num_vars": num_vars
+                    },
+                    "best_auc": best_auc,
+                    "best_epoch": best_epoch
+                }, save_path)
+                best_auc_str = f"{best_auc:.4f}" if best_auc is not None else "N/A (single class in validation)"
+                print(f"\nTraining completed. Best AUC-ROC: {best_auc_str} at epoch {best_epoch+1}. Final model saved at epoch {ep+1}.", flush=True)
         
         return save_path
     
@@ -256,25 +472,52 @@ def train_ours(
         end_idx = min(i + batch_size, n_train_fine)
         fine_batches.append(idx_fine_tr[i:end_idx])
     
-    # Track best validation F1 for model saving
-    best_f1 = 0.0
+    # Resume from checkpoint if provided
+    start_epoch = 0
+    best_auc = None
     best_epoch = 0
+    if resume_from is not None:
+        print(f"\nResuming training from checkpoint: {resume_from}")
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
+        enc_fine.load_state_dict(checkpoint['enc_fine'])
+        enc_coarse.load_state_dict(checkpoint['enc_coarse'])
+        head.load_state_dict(checkpoint['head'])
+        if 'optimizer' in checkpoint:
+            opt.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        best_auc = checkpoint.get('best_auc', None)
+        best_epoch = checkpoint.get('best_epoch', 0)
+        print(f"  Resumed from epoch {start_epoch}, best AUC: {best_auc}, best epoch: {best_epoch+1}")
     
-    for ep in range(epochs):
+    for ep in range(start_epoch, epochs):
         enc_fine.train()
         enc_coarse.train()
         head.train()
-        opt.zero_grad()
-        
-        total_loss = 0.0
+        total_loss_scalar = 0.0
         n_batches = 0
         
         if (ep + 1) % 10 == 0 or ep == 0 or ep == epochs - 1:
             print(f"Epoch {ep+1}/{epochs} - Training...", flush=True)
         
+        opt.zero_grad()
+        
+        total_loss_count = 0
         for batch_idx_fine in fine_batches:
-            X_fine_batch = data['X_fine'][batch_idx_fine]
-            X_next_fine_batch = data['X_next_fine'][batch_idx_fine]
+            mapping_batch = data['mapping'][batch_idx_fine]
+            valid_mask = (mapping_batch >= 0)
+            if valid_mask.sum() > 0:
+                coarse_indices = mapping_batch[valid_mask]
+                unique_coarse_indices = coarse_indices.unique()
+                fine_to_coarse_map = {}
+                for i, coarse_idx in enumerate(coarse_indices):
+                    if coarse_idx.item() not in fine_to_coarse_map:
+                        fine_to_coarse_map[coarse_idx.item()] = []
+                total_loss_count += len(fine_to_coarse_map)
+        
+        for batch_idx_fine in fine_batches:
+            X_fine_batch = data['X_fine'][batch_idx_fine].to(device)
+            X_next_fine_batch = data['X_next_fine'][batch_idx_fine].to(device)
+            
             mapping_batch = data['mapping'][batch_idx_fine]
             valid_mask = (mapping_batch >= 0)
             
@@ -285,8 +528,8 @@ def train_ours(
             
             coarse_indices = mapping_batch[valid_mask]
             unique_coarse_indices = coarse_indices.unique()
-            X_coarse_batch = data['X_coarse'][unique_coarse_indices]
-            X_next_coarse_batch = data['X_next_coarse'][unique_coarse_indices]
+            X_coarse_batch = data['X_coarse'][unique_coarse_indices].to(device)
+            X_next_coarse_batch = data['X_next_coarse'][unique_coarse_indices].to(device)
             z_coarse_batch = enc_coarse(X_coarse_batch)
             
             fine_to_coarse_map = {}
@@ -296,7 +539,8 @@ def train_ours(
                     fine_to_coarse_map[coarse_idx.item()] = []
                 fine_to_coarse_map[coarse_idx.item()].append(fine_idx)
             
-            for coarse_idx, fine_indices_list in fine_to_coarse_map.items():
+            coarse_idx_list = list(fine_to_coarse_map.keys())
+            for idx, (coarse_idx, fine_indices_list) in enumerate(fine_to_coarse_map.items()):
                 coarse_pos = (unique_coarse_indices == coarse_idx).nonzero(as_tuple=True)[0]
                 if len(coarse_pos) == 0:
                     continue
@@ -329,20 +573,33 @@ def train_ours(
                     Lu = F.smooth_l1_loss(u_fine.unsqueeze(0), u_coarse.unsqueeze(0))
                     batch_loss = batch_loss + lambda_u * Lu
                 
-                total_loss = total_loss + batch_loss
+                total_loss_scalar += batch_loss.item()
+                if total_loss_count > 0:
+                    scaled_loss = batch_loss / total_loss_count
+                    is_last_in_batch = (idx == len(coarse_idx_list) - 1)
+                    scaled_loss.backward(retain_graph=not is_last_in_batch)
+                    del scaled_loss
+                
+                del pred_fine_batch, pred_coarse_batch, mse_fine, mse_coarse, batch_loss
+                if use_lu:
+                    del u_fine, u_coarse, Lu
+                del z_fine_subset, X_next_fine_subset, z_coarse_subset, X_next_coarse_subset
                 n_batches += 1
+                
+                if device.type == 'cuda' and n_batches % 5 == 0:
+                    torch.cuda.empty_cache()
+            
+            del z_fine_batch, z_coarse_batch, X_coarse_batch, X_next_coarse_batch, X_fine_batch, X_next_fine_batch
         
         if n_batches > 0:
-            loss = total_loss / n_batches
+            torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+            opt.step()
+            loss_scalar = total_loss_scalar / n_batches
         else:
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
-        
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-        opt.step()
+            loss_scalar = 0.0
         
         if (ep + 1) % 10 == 0 or ep == 0 or ep == epochs - 1:
-            print(f"  Loss: {loss.item():.6f}, Batches: {n_batches}", flush=True)
+            print(f"  Loss: {loss_scalar:.6f}, Batches: {n_batches}", flush=True)
         
         enc_fine.eval()
         enc_coarse.eval()
@@ -355,72 +612,86 @@ def train_ours(
             for i in range(0, len(idx_coarse_val), batch_size):
                 end_idx = min(i + batch_size, len(idx_coarse_val))
                 batch_idx = idx_coarse_val[i:end_idx]
-                X_coarse_batch = data['X_coarse'][batch_idx]
+                X_coarse_batch = data['X_coarse'][batch_idx].to(device)
                 z_coarse_batch = enc_coarse(X_coarse_batch)
                 _, pred_coarse_batch = head(z_coarse_batch, z_coarse_batch)
                 pred_coarse_val_list.append(pred_coarse_batch.cpu())
             
             if len(pred_coarse_val_list) > 0:
                 pred_coarse_val = torch.cat(pred_coarse_val_list, dim=0)
-                pred_coarse_val_mean = pred_coarse_val.mean(dim=1).to(device)
-                residual_coarse = (data['X_next_coarse'][idx_coarse_val].mean(dim=1) - pred_coarse_val_mean).abs()
+                pred_coarse_val_mean = pred_coarse_val.mean(dim=1)
+                X_next_coarse_val_mean = data['X_next_coarse'][idx_coarse_val].mean(dim=1)
+                residual_coarse = (X_next_coarse_val_mean - pred_coarse_val_mean).abs()
                 res_val = residual_coarse.cpu().numpy()
                 if data['y_coarse'] is not None:
                     y_val = data['y_coarse'][idx_coarse_val].cpu().numpy()
-                    ths = np.linspace(np.percentile(res_val, 10), np.percentile(res_val, 95), 25)
-                    f1s = [f1_score(y_val, (res_val >= t).astype(int), zero_division=0) for t in ths]
-                    f1 = max(f1s) if len(f1s) else 0.0
+                    # Check if validation set has only one class (all normal or all anomaly)
+                    unique_classes = np.unique(y_val)
+                    if len(unique_classes) < 2:
+                        # Skip ROC AUC calculation if only one class present
+                        auc = None
+                    else:
+                        try:
+                            auc = roc_auc_score(y_val, res_val)
+                        except (ValueError, Exception):
+                            auc = None
                 else:
-                    f1 = 0.0
+                    auc = None
             else:
-                f1 = 0.0
+                auc = 0.0
         
         if (ep + 1) % 10 == 0 or ep == 0 or ep == epochs - 1:
-            print(f"  Validation F1: {f1:.4f}", flush=True)
+            auc_str = f"{auc:.4f}" if auc is not None else "N/A (single class)"
+            print(f"  Validation AUC-ROC: {auc_str}", flush=True)
         
-        # Save best model based on validation F1
-        if f1 > best_f1:
-            best_f1 = f1
+        # Save best model based on validation AUC-ROC (only if auc is valid)
+        if auc is not None and (best_auc is None or auc > best_auc):
+            best_auc = auc
             best_epoch = ep
             save_dict = {
                 "epoch": ep,
                 "enc_fine": enc_fine.state_dict(),
                 "enc_coarse": enc_coarse.state_dict(),
                 "head": head.state_dict(),
+                "optimizer": opt.state_dict(),
                 "config": {
                     "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
                     "pooling": pooling, "coarse_only": False,
                     "use_classification": use_classification, "use_lu": use_lu
                 },
-                "best_f1": best_f1,
+                "best_auc": best_auc,
                 "best_epoch": best_epoch
             }
             if use_lu:
                 save_dict["config"]["lambda_u"] = lambda_u
             torch.save(save_dict, save_path)
             if (ep + 1) % 10 == 0 or ep == 0:
-                print(f"  -> Best model saved (F1={best_f1:.4f} at epoch {ep+1})", flush=True)
+                best_auc_str = f"{best_auc:.4f}" if best_auc is not None else "N/A"
+                print(f"  -> Best model saved (AUC-ROC={best_auc_str} at epoch {ep+1})", flush=True)
         
-        # Also save at regular intervals and final epoch
-        if ep == epochs - 1 or (ep + 1) % 10 == 0:
-            if ep != best_epoch:  # Don't save again if already saved as best
-                save_dict = {
-                    "epoch": ep,
-                    "enc_fine": enc_fine.state_dict(),
-                    "enc_coarse": enc_coarse.state_dict(),
-                    "head": head.state_dict(),
-                    "config": {
-                        "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
-                        "pooling": pooling, "coarse_only": False,
-                        "use_classification": use_classification, "use_lu": use_lu
-                    },
-                    "best_f1": best_f1,
-                    "best_epoch": best_epoch
-                }
-                if use_lu:
-                    save_dict["config"]["lambda_u"] = lambda_u
-                torch.save(save_dict, save_path)
-            if ep == epochs - 1:
-                print(f"\nTraining completed. Best model (F1={best_f1:.4f}) saved from epoch {best_epoch+1}.", flush=True)
+        # Always save final epoch (especially when auc is None throughout training)
+        if ep == epochs - 1:
+            # If no valid auc was found, use final epoch as best
+            if best_auc is None:
+                best_epoch = ep
+            save_dict = {
+                "epoch": ep,
+                "enc_fine": enc_fine.state_dict(),
+                "enc_coarse": enc_coarse.state_dict(),
+                "head": head.state_dict(),
+                "optimizer": opt.state_dict(),
+                "config": {
+                    "d_model": d_model, "nhead": nhead, "num_layers": num_layers,
+                    "pooling": pooling, "coarse_only": False,
+                    "use_classification": use_classification, "use_lu": use_lu
+                },
+                "best_auc": best_auc,
+                "best_epoch": best_epoch
+            }
+            if use_lu:
+                save_dict["config"]["lambda_u"] = lambda_u
+            torch.save(save_dict, save_path)
+            best_auc_str = f"{best_auc:.4f}" if best_auc is not None else "N/A (single class in validation)"
+            print(f"\nTraining completed. Best model (AUC-ROC={best_auc_str}) saved from epoch {best_epoch+1}.", flush=True)
     
     return save_path

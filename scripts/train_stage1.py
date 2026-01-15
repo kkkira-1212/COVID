@@ -69,6 +69,9 @@ def analyze_residual_separation(residual, y_true, idx_val, idx_test, save_path=N
         stats['signal_ratio'] = float('inf') if median_anomaly > 0 else 0.0
     
     if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
         if len(residual_normal_val) > 0:
@@ -239,8 +242,8 @@ def apply_multi_scale_subset_sampling(bundle_fine, bundle_coarse, max_samples):
 def detect_dataset_type(data_dir):
     data_dir = Path(data_dir)
     
-    coarse_files = ['psm_coarse.pt', 'swat_hour.pt', 'coarse.pt']
-    fine_files = ['psm_fine.pt', 'swat_minute.pt', 'fine.pt']
+    coarse_files = ['psm_coarse.pt', 'swat_hour.pt', 'smap_coarse.pt', 'coarse.pt']
+    fine_files = ['psm_fine.pt', 'swat_minute.pt', 'smap_fine.pt', 'fine.pt']
     
     for coarse_file in coarse_files:
         if (data_dir / coarse_file).exists():
@@ -277,6 +280,7 @@ def main():
     parser.add_argument('--fine_file', type=str, default=None, help='Fine scale data file (auto-detect if not specified)')
     parser.add_argument('--model_save_path', type=str, required=True, help='Model save path')
     parser.add_argument('--coarse_only', action='store_true', help='Train only coarse scale')
+    parser.add_argument('--fine_only', action='store_true', help='Train only fine scale')
     parser.add_argument('--use_lu', action='store_true', help='Use LU loss')
     parser.add_argument('--lambda_u', type=float, default=1.0, help='Lambda for LU loss')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
@@ -291,6 +295,7 @@ def main():
     parser.add_argument('--skip_training', action='store_true', help='Skip training, only evaluate')
     parser.add_argument('--plot_path', type=str, default=None, help='Path to save residual plot')
     parser.add_argument('--max_samples', type=int, default=None, help='Maximum number of samples for quick validation')
+    parser.add_argument('--resume_from', type=str, default=None, help='Resume training from checkpoint path')
     
     args = parser.parse_args()
     
@@ -306,12 +311,26 @@ def main():
         coarse_file, fine_file = detect_dataset_type(data_dir)
         if args.coarse_file is None:
             args.coarse_file = coarse_file
-        if args.fine_file is None and not args.coarse_only:
+        if args.fine_file is None and not args.coarse_only and not args.fine_only:
             args.fine_file = fine_file
     else:
-        fine_file = args.fine_file if not args.coarse_only else None
+        if args.fine_only:
+            fine_file = args.fine_file
+        elif args.coarse_only:
+            fine_file = None
+        else:
+            fine_file = args.fine_file
     
-    bundle_coarse, bundle_fine = load_data_bundles(data_dir, args.coarse_file, fine_file)
+    if args.fine_only:
+        if args.fine_file is None:
+            _, fine_file = detect_dataset_type(data_dir)
+            if fine_file is None:
+                raise ValueError("Fine scale data file not found and not specified")
+        bundle_coarse, bundle_fine = load_data_bundles(data_dir, args.coarse_file, fine_file)
+        if bundle_fine is None:
+            raise ValueError("bundle_fine is required for fine_only training")
+    else:
+        bundle_coarse, bundle_fine = load_data_bundles(data_dir, args.coarse_file, fine_file)
     
     if args.max_samples is not None and args.max_samples > 0:
         print(f"\nUsing data subset for quick validation (max_samples={args.max_samples})...")
@@ -340,9 +359,13 @@ def main():
     print(f"  Val   - Normal: {np.sum(y_val == 0)}, Anomaly: {np.sum(y_val == 1)}")
     print(f"  Test  - Normal: {np.sum(y_test == 0)}, Anomaly: {np.sum(y_test == 1)}")
     
+    # Check if validation set has anomalies
+    val_has_anomalies = np.sum(y_val == 1) > 0
+    
     if not args.skip_training:
         print(f"\nTraining model...")
         print(f"  Coarse only: {args.coarse_only}")
+        print(f"  Fine only: {args.fine_only}")
         print(f"  Use LU loss: {args.use_lu}")
         print(f"  Epochs: {args.epochs}")
         print(f"  Learning rate: {args.lr}")
@@ -351,9 +374,10 @@ def main():
         
         model_path = train(
             bundle_coarse=bundle_coarse,
-            bundle_fine=bundle_fine if not args.coarse_only else None,
+            bundle_fine=bundle_fine if (not args.coarse_only) or args.fine_only else None,
             save_path=args.model_save_path,
             coarse_only=args.coarse_only,
+            fine_only=args.fine_only,
             use_classification=False,
             use_lu=args.use_lu,
             lambda_u=args.lambda_u,
@@ -365,69 +389,87 @@ def main():
             num_layers=args.num_layers,
             pooling=args.pooling,
             batch_size=args.batch_size,
-            device=args.device
+            device=args.device,
+            resume_from=args.resume_from
         )
         print(f"\nModel saved to: {model_path}")
     else:
         model_path = args.model_save_path
         print(f"\nSkipping training, using existing model: {model_path}")
     
-    print(f"\nEvaluating model and computing residuals...")
-    inference_result = infer(
-        model_path=model_path,
-        bundle_coarse=bundle_coarse,
-        bundle_fine=bundle_fine if not args.coarse_only else None,
-        device=args.device
-    )
-    
-    residual = inference_result['residual']
-    y_true = inference_result['y_true']
-    idx_val = inference_result['idx_val']
-    idx_test = inference_result['idx_test']
-    
-    print(f"\nComputing evaluation metrics...")
-    eval_metrics = evaluate(residual, y_true, idx_val, idx_test)
-    
-    print(f"\nEvaluation Metrics:")
-    print(f"  Threshold: {eval_metrics['threshold']:.6f}")
-    print(f"  F1 Score: {eval_metrics['f1']:.4f}")
-    print(f"  Precision: {eval_metrics['precision']:.4f}")
-    print(f"  Recall: {eval_metrics['recall']:.4f}")
-    print(f"  ROC-AUC: {eval_metrics['roc_auc']:.4f}")
-    print(f"  AUPRC: {eval_metrics['auprc']:.4f}")
-    
-    if args.plot_path:
-        print(f"\nAnalyzing residual separation quality...")
-        separation_stats = analyze_residual_separation(
-            residual, y_true, idx_val, idx_test, save_path=args.plot_path
+    # Skip evaluation if validation set has no anomalies (e.g., SMAP dataset)
+    if not val_has_anomalies:
+        print(f"\n⚠ Validation set has no anomalies. Skipping evaluation.")
+        print(f"  (This is normal for datasets like SMAP where train/val are all normal)")
+        print(f"  Model saved from final epoch. You can evaluate on test set separately.")
+    else:
+        print(f"\nEvaluating model and computing residuals...")
+        inference_result = infer(
+            model_path=model_path,
+            bundle_coarse=bundle_coarse,
+            bundle_fine=bundle_fine if (not args.coarse_only) or args.fine_only else None,
+            device=args.device
         )
         
-        signal_ratio = compute_signal_ratio(residual, y_true, idx_test)
+        residual = inference_result['residual']
+        y_true = inference_result['y_true']
+        idx_val = inference_result['idx_val']
+        idx_test = inference_result['idx_test']
         
-        print(f"\nResidual Separation Statistics:")
-        print(f"\nValidation Set:")
-        print(f"  Normal:   n={separation_stats['val_normal_count']}, median={separation_stats['val_normal_median']:.6f}, mean={separation_stats['val_normal_mean']:.6f}, std={separation_stats['val_normal_std']:.6f}")
-        if separation_stats['val_anomaly_count'] > 0:
-            print(f"  Anomaly:  n={separation_stats['val_anomaly_count']}, median={separation_stats['val_anomaly_median']:.6f}, mean={separation_stats['val_anomaly_mean']:.6f}, std={separation_stats['val_anomaly_std']:.6f}")
+        print(f"\nComputing evaluation metrics...")
+        eval_metrics = evaluate(residual, y_true, idx_val, idx_test)
         
-        print(f"\nTest Set:")
-        print(f"  Normal:   n={separation_stats['test_normal_count']}, median={separation_stats['test_normal_median']:.6f}, mean={separation_stats['test_normal_mean']:.6f}, std={separation_stats['test_normal_std']:.6f}")
-        if separation_stats['test_anomaly_count'] > 0:
-            print(f"  Anomaly:  n={separation_stats['test_anomaly_count']}, median={separation_stats['test_anomaly_median']:.6f}, mean={separation_stats['test_anomaly_mean']:.6f}, std={separation_stats['test_anomaly_std']:.6f}")
+        print(f"\nEvaluation Metrics:")
+        print(f"  Threshold: {eval_metrics['threshold']:.6f}")
+        print(f"  F1 Score: {eval_metrics['f1']:.4f}")
+        print(f"  Precision: {eval_metrics['precision']:.4f}")
+        print(f"  Recall: {eval_metrics['recall']:.4f}")
+        print(f"  ROC-AUC: {eval_metrics['roc_auc']:.4f}")
+        print(f"  AUPRC: {eval_metrics['auprc']:.4f}")
         
-        print(f"\nSignal Ratio (Anomaly/Normal median): {signal_ratio:.2f}x")
-        print(f"ROC-AUC: {eval_metrics['roc_auc']:.4f}")
+        if args.plot_path:
+            print(f"\nAnalyzing residual separation quality...")
+            separation_stats = analyze_residual_separation(
+                residual, y_true, idx_val, idx_test, save_path=args.plot_path
+            )
+            
+            signal_ratio = compute_signal_ratio(residual, y_true, idx_test)
+            
+            print(f"\nResidual Separation Statistics:")
+            print(f"\nValidation Set:")
+            print(f"  Normal:   n={separation_stats['val_normal_count']}, median={separation_stats['val_normal_median']:.6f}, mean={separation_stats['val_normal_mean']:.6f}, std={separation_stats['val_normal_std']:.6f}")
+            if separation_stats['val_anomaly_count'] > 0:
+                print(f"  Anomaly:  n={separation_stats['val_anomaly_count']}, median={separation_stats['val_anomaly_median']:.6f}, mean={separation_stats['val_anomaly_mean']:.6f}, std={separation_stats['val_anomaly_std']:.6f}")
+            
+            print(f"\nTest Set:")
+            print(f"  Normal:   n={separation_stats['test_normal_count']}, median={separation_stats['test_normal_median']:.6f}, mean={separation_stats['test_normal_mean']:.6f}, std={separation_stats['test_normal_std']:.6f}")
+            if separation_stats['test_anomaly_count'] > 0:
+                print(f"  Anomaly:  n={separation_stats['test_anomaly_count']}, median={separation_stats['test_anomaly_median']:.6f}, mean={separation_stats['test_anomaly_mean']:.6f}, std={separation_stats['test_anomaly_std']:.6f}")
+            
+            print(f"\nSignal Ratio (Anomaly/Normal median): {signal_ratio:.2f}x")
+            print(f"ROC-AUC: {eval_metrics['roc_auc']:.4f}")
+        
+        print(f"\n" + "=" * 60)
+        print("Training Summary")
+        print("=" * 60)
+        print(f"✓ Pipeline: OK (data loaded and processed)")
+        print(f"✓ Split: OK (train/val/test split maintained)")
+        if eval_metrics['roc_auc'] > 0.5:
+            print(f"✓ Residual Separation: GOOD (ROC-AUC = {eval_metrics['roc_auc']:.4f} > 0.5)")
+        else:
+            print(f"⚠ Residual Separation: POOR (ROC-AUC = {eval_metrics['roc_auc']:.4f} <= 0.5)")
+        print("=" * 60)
     
-    print(f"\n" + "=" * 60)
-    print("Training Summary")
-    print("=" * 60)
-    print(f"✓ Pipeline: OK (data loaded and processed)")
-    print(f"✓ Split: OK (train/val/test split maintained)")
-    if eval_metrics['roc_auc'] > 0.5:
-        print(f"✓ Residual Separation: GOOD (ROC-AUC = {eval_metrics['roc_auc']:.4f} > 0.5)")
-    else:
-        print(f"⚠ Residual Separation: POOR (ROC-AUC = {eval_metrics['roc_auc']:.4f} <= 0.5)")
-    print("=" * 60)
+    # Always print final summary
+    if not val_has_anomalies:
+        print(f"\n" + "=" * 60)
+        print("Training Summary")
+        print("=" * 60)
+        print(f"✓ Pipeline: OK (data loaded and processed)")
+        print(f"✓ Split: OK (train/val/test split maintained)")
+        print(f"⚠ Evaluation: Skipped (validation set has no anomalies)")
+        print(f"  Model saved from final epoch. Evaluate on test set separately if needed.")
+        print("=" * 60)
 
 
 if __name__ == '__main__':

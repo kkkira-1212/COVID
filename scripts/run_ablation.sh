@@ -19,7 +19,7 @@ fi
 
 if [ "$EXP_TYPE" = "all" ] || [ "$EXP_TYPE" = "weekonly" ]; then
     python scripts/run_baselines.py \
-        --data_path "$DATA_WEEK" \
+        --data_path "/home/kitsch/COVID/data/processed/week_6feat.pt" \
         --models ours_weekonly \
         --save_dir "$SAVE_DIR/weekonly" \
         --epochs 200

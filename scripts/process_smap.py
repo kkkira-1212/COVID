@@ -8,15 +8,14 @@ import json
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from utils.sequences import create_sequences, split_sequences, sequences_to_bundle, standardize
-from utils.mapping import add_mapping
+from utils.sequences import sequences_to_bundle, standardize
 
 
-def load_psm_data(data_dir, split='train'):
-    """Load PSM data from CSV files.
+def load_smap_data(data_dir, split='train'):
+    """Load SMAP data from numpy files.
     
     Args:
-        data_dir: Path to PSM data directory (should contain train.csv, test.csv, test_label.csv)
+        data_dir: Path to SMAP data directory (should contain SMAP_train.npy, SMAP_test.npy, SMAP_test_label.npy)
         split: 'train' or 'test'
     
     Returns:
@@ -26,46 +25,40 @@ def load_psm_data(data_dir, split='train'):
     data_dir = Path(data_dir)
     
     if split == 'train':
-        df = pd.read_csv(data_dir / 'train.csv')
-        df['outbreak_label'] = 0  # PSM train data is all normal
+        data = np.load(data_dir / 'SMAP_train.npy')
+        labels = np.zeros(data.shape[0], dtype=int)  # All normal
     elif split == 'test':
-        df = pd.read_csv(data_dir / 'test.csv')
-        df_label = pd.read_csv(data_dir / 'test_label.csv')
-        # Merge labels based on timestamp
-        df = df.merge(df_label, on='timestamp_(min)', how='left')
-        df['outbreak_label'] = df['label'].fillna(0).astype(int)
-        df = df.drop(columns=['label'])
+        data = np.load(data_dir / 'SMAP_test.npy')
+        labels = np.load(data_dir / 'SMAP_test_label.npy').astype(int)
     else:
         raise ValueError(f"split must be 'train' or 'test', got {split}")
     
-    # Create Date from timestamp (assuming timestamp is minutes from start)
-    # Use a base date and add minutes
+    # Create DataFrame
+    n_features = data.shape[1]
+    feature_cols = [f'feature_{i}' for i in range(n_features)]
+    
+    df = pd.DataFrame(data, columns=feature_cols)
+    df['outbreak_label'] = labels
+    df['timestamp'] = np.arange(len(df))  # Use index as timestamp
+    
+    # Create Date from timestamp (assuming each step is 1 unit of time)
     base_date = pd.Timestamp('2020-01-01 00:00:00')
-    df['Date'] = base_date + pd.to_timedelta(df['timestamp_(min)'], unit='m')
-    # Use timestamp as a numeric identifier
-    df['State'] = 'PSM'
+    df['Date'] = base_date + pd.to_timedelta(df['timestamp'], unit='m')
+    df['State'] = 'SMAP'
     
-    # Extract feature columns (all columns except timestamp, Date, State, outbreak_label)
-    feature_cols = [col for col in df.columns 
-                    if col not in ['timestamp_(min)', 'Date', 'State', 'outbreak_label']]
-    
-    # Ensure all features are numeric
-    for col in feature_cols:
-        if df[col].dtype == 'object':
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Create target_return for regression (percentage change of first feature)
+    target_feature = feature_cols[0]
+    df['target_return'] = df[target_feature].pct_change().fillna(0)
     
     # Fill NaN values
     num_cols = df.select_dtypes(include=[np.number]).columns
     df[num_cols] = df[num_cols].ffill().fillna(0)
     
-    # Sort by timestamp
-    df = df.sort_values('timestamp_(min)').reset_index(drop=True)
-    
     return df, feature_cols
 
 
 def create_sequences_with_mapping(state_data, feature_cols, window_size, stride=1, 
-                                  target_time_col='timestamp_(min)'):
+                                  target_time_col='timestamp'):
     """Create sequences with proper time tracking.
     
     Args:
@@ -216,11 +209,6 @@ def create_fine_to_coarse_mapping(fine_sequences, coarse_sequences, k):
     
     Mapping rule: coarse_t ↔ fine_[t*k : (t+1)*k]
     
-    This means:
-    - coarse_0 corresponds to fine_[0 : k]
-    - coarse_1 corresponds to fine_[k : 2*k]
-    - coarse_t corresponds to fine_[t*k : (t+1)*k]
-    
     Args:
         fine_sequences: List of fine sequence dictionaries
         coarse_sequences: List of coarse sequence dictionaries
@@ -253,20 +241,18 @@ def create_fine_to_coarse_mapping(fine_sequences, coarse_sequences, k):
 
 def split_sequences_preserve_test(fine_sequences_train, fine_sequences_test,
                                    coarse_sequences_train, coarse_sequences_test,
-                                   train_ratio=0.8, val_ratio=0.2):
+                                   train_ratio=0.6, val_ratio=0.2):
     """Split sequences while preserving test set.
     
     Only split train sequences into train/val. Test sequences remain as test.
-    Original train/test split is preserved.
     
     Args:
         fine_sequences_train: List of fine sequences from train set
         fine_sequences_test: List of fine sequences from test set
         coarse_sequences_train: List of coarse sequences from train set
         coarse_sequences_test: List of coarse sequences from test set
-        train_ratio: Ratio of training data (from original train set, should be 0.8)
-        val_ratio: Ratio of validation data (from original train set, should be 0.2)
-        Note: train_ratio + val_ratio should be <= 1.0
+        train_ratio: Ratio of training data (from train set)
+        val_ratio: Ratio of validation data (from train set)
     
     Returns:
         idx_tr_fine, idx_v_fine, idx_te_fine: Fine scale indices
@@ -303,31 +289,29 @@ def split_sequences_preserve_test(fine_sequences_train, fine_sequences_test,
             fine_sequences_all, coarse_sequences_all)
 
 
-def process_psm_data(
-    data_dir='data/PSM/PSM',
-    output_dir='data/PSM/processed',
+def process_smap_data(
+    data_dir='data/SMAP',
+    output_dir='data/SMAP/processed',
     window_fine=60,
     window_coarse=12,
     k=5,  # Aggregation factor: k fine steps -> 1 coarse step
     train_ratio=0.8,
     val_ratio=0.2,
     agg_func='mean',
-    feature_cols=None,
-    max_features=None
+    feature_cols=None
 ):
-    """Process PSM data into fine and coarse scales with explicit mapping.
+    """Process SMAP data into fine and coarse scales with explicit mapping.
     
     Args:
-        data_dir: Directory containing PSM CSV files
+        data_dir: Directory containing SMAP numpy files
         output_dir: Output directory for processed data
         window_fine: Window size for fine sequences
         window_coarse: Window size for coarse sequences
         k: Aggregation factor (k fine steps aggregate to 1 coarse step)
-        train_ratio: Ratio of training data
-        val_ratio: Ratio of validation data
+        train_ratio: Ratio of training data (from train set)
+        val_ratio: Ratio of validation data (from train set)
         agg_func: Aggregation function for coarse scale ('mean', 'sum', 'max', 'min')
         feature_cols: Specific features to use (None = use all)
-        max_features: Maximum number of features to use (None = use all)
     
     Returns:
         bundle_fine: Fine scale data bundle
@@ -339,9 +323,9 @@ def process_psm_data(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load train and test data separately
-    print("Loading PSM data...")
-    df_train, feature_cols_all = load_psm_data(data_dir, split='train')
-    df_test, _ = load_psm_data(data_dir, split='test')
+    print("Loading SMAP data...")
+    df_train, feature_cols_all = load_smap_data(data_dir, split='train')
+    df_test, _ = load_smap_data(data_dir, split='test')
     
     print(f"Train samples: {len(df_train):,}")
     print(f"Test samples: {len(df_test):,}")
@@ -349,11 +333,7 @@ def process_psm_data(
     
     # Select features
     if feature_cols is None:
-        if max_features is not None and max_features < len(feature_cols_all):
-            # Select first max_features features (or could use feature selection)
-            use_features = feature_cols_all[:max_features]
-        else:
-            use_features = feature_cols_all
+        use_features = feature_cols_all
     else:
         use_features = [f for f in feature_cols if f in feature_cols_all]
         if len(use_features) == 0:
@@ -361,23 +341,17 @@ def process_psm_data(
     
     print(f"Using {len(use_features)} features")
     
-    # Create target_return for regression (percentage change)
-    # Use first feature as target for simplicity
-    target_feature = use_features[0]
-    df_train['target_return'] = df_train[target_feature].pct_change().fillna(0)
-    df_test['target_return'] = df_test[target_feature].pct_change().fillna(0)
-    
     # Prepare fine scale data (keep train and test separate)
-    fine_data_train = {'PSM': df_train.copy()}
-    fine_data_test = {'PSM': df_test.copy()}
+    fine_data_train = {'SMAP': df_train.copy()}
+    fine_data_test = {'SMAP': df_test.copy()}
     
     # Create fine sequences (separately for train and test)
     print("Creating fine sequences...")
     fine_sequences_train, fine_states_train = create_sequences_with_mapping(
-        fine_data_train, use_features, window_fine, stride=1, target_time_col='timestamp_(min)'
+        fine_data_train, use_features, window_fine, stride=1, target_time_col='timestamp'
     )
     fine_sequences_test, fine_states_test = create_sequences_with_mapping(
-        fine_data_test, use_features, window_fine, stride=1, target_time_col='timestamp_(min)'
+        fine_data_test, use_features, window_fine, stride=1, target_time_col='timestamp'
     )
     
     print(f"Created {len(fine_sequences_train):,} train fine sequences")
@@ -448,13 +422,13 @@ def process_psm_data(
     
     # Save
     print(f"\nSaving to {output_dir}...")
-    torch.save(bundle_fine, output_dir / 'psm_fine.pt')
-    torch.save(bundle_coarse, output_dir / 'psm_coarse.pt')
+    torch.save(bundle_fine, output_dir / 'smap_fine.pt')
+    torch.save(bundle_coarse, output_dir / 'smap_coarse.pt')
     
     # Save info
     info = {
-        'dataset': 'PSM',
-        'target_feature': target_feature,
+        'dataset': 'SMAP',
+        'target_feature': use_features[0],
         'fine_shape': list(bundle_fine['X_seq'].shape),
         'coarse_shape': list(bundle_coarse['X_seq'].shape),
         'features': use_features,
@@ -478,7 +452,7 @@ def process_psm_data(
         'test_anomaly_ratio_coarse': float(y_true_coarse[idx_te_coarse].mean().item()),
     }
     
-    with open(output_dir / 'psm_info.json', 'w') as f:
+    with open(output_dir / 'smap_info.json', 'w') as f:
         json.dump(info, f, indent=2)
     
     print("Processing complete!")
@@ -488,20 +462,19 @@ def process_psm_data(
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Process PSM data into fine/coarse scales')
-    parser.add_argument('--data_dir', type=str, default='data/PSM/PSM')
-    parser.add_argument('--output_dir', type=str, default='data/PSM/processed')
+    parser = argparse.ArgumentParser(description='Process SMAP data into fine/coarse scales')
+    parser.add_argument('--data_dir', type=str, default='data/SMAP')
+    parser.add_argument('--output_dir', type=str, default='data/SMAP/processed')
     parser.add_argument('--window_fine', type=int, default=60, help='Window size for fine sequences')
     parser.add_argument('--window_coarse', type=int, default=12, help='Window size for coarse sequences')
     parser.add_argument('--k', type=int, default=5, help='Aggregation factor (k fine steps -> 1 coarse step)')
-    parser.add_argument('--train_ratio', type=float, default=0.8, help='Ratio of training data from original train set (default: 0.8)')
-    parser.add_argument('--val_ratio', type=float, default=0.2, help='Ratio of validation data from original train set (default: 0.2)')
+    parser.add_argument('--train_ratio', type=float, default=0.8)
+    parser.add_argument('--val_ratio', type=float, default=0.2)
     parser.add_argument('--agg_func', type=str, default='mean', choices=['mean', 'sum', 'max', 'min'])
-    parser.add_argument('--max_features', type=int, default=None, help='Maximum number of features to use')
     
     args = parser.parse_args()
     
-    bundle_fine, bundle_coarse, info = process_psm_data(
+    bundle_fine, bundle_coarse, info = process_smap_data(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         window_fine=args.window_fine,
@@ -509,8 +482,7 @@ if __name__ == '__main__':
         k=args.k,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
-        agg_func=args.agg_func,
-        max_features=args.max_features
+        agg_func=args.agg_func
     )
     
     print("\nProcessing Summary:")

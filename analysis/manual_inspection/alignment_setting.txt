@@ -1,0 +1,51 @@
+最简而言之,就是我们在这29个数据里面,找到一些比较适合我们这个模型的数据。然后呢,用相同的训练setting,以及相同的evaluation strategies,如果我们的结果比这个论文当中列出来的一些其他方法,因为它不是跑了46个方法吗,40个方法,要好的话,那我们就成功了,可以这么说吗?
+① 数据层面
+在 TAB 提供的 29 个 multivariate datasets 
+选择与我们模型假设匹配的数据
+    multivariate
+    temporal dependency 明显
+    window / forecasting / residual 合理
+
+
+① Inconsistent Dataset Splitting Issue（数据切分）
+它在解决一个老问题：
+不同论文、不同数据，train / test 切法不一致。
+他们的规则是：
+    如果原始数据自带 split
+    → 完全沿用
+    如果原始数据没有 split
+    → 用统一规则：
+    50%：train + validation
+    50%：test
+    在 train+val 里：
+    最后 20% 作为 validation
+目标：保证 train 里的 anomaly 比较少
+
+
+② 训练层面
+使用 与 TAB 一致或可对齐的 training setting
+    full-shot
+    不额外清洗 anomaly
+    合理使用 validation
+
+
+③ 评估层面
+使用 相同的 evaluation strategies
+    score-based metrics（AUC-ROC / VUS）
+    必要时再报 label-based
+    不用 point-adjust
+    threshold 只是 decision 层
+
+预先固定一个 threshold 候选集合：
+[0.1, 0.5, 1, 2, 3, 5, 10, 15, 20, 25]  （百分比）
+对每一个 threshold 都算一遍指标, 报告最优结果
+
+我们现在的测试是用重叠窗口，但没有“同一时间点多次打分再取 max/mean”的步骤。
+所以 TAB 说的那种“overlap + 多次预测/聚合形成隐形优势”在我们当前评估里基本不成立。
+原因很简单：
+我们的滑窗是 stride=1，确实 overlap
+但每个 window 只预测一个点：t 的 X_next / y_next
+所以每个时间点 t 在数据里只会出现一次作为 target，不会被多次打分
+也没有对同一时间点的多个分数取 max/mean 的聚合逻辑
+
+我们也可以考虑要不要统一到不用overlap

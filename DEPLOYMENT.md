@@ -86,3 +86,7 @@ python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); 
 - Use `--max_samples` for quick validation with subset
 - Remove `--max_samples` for full dataset training
 
+
+
+
+
