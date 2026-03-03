@@ -25,6 +25,8 @@ ENV/
 # Data files (large, should be downloaded separately)
 data/
 !data/.gitkeep
+!data/processing/
+!data/processing/*.py
 
 # Trained models (large, should be trained or downloaded separately)
 models/
