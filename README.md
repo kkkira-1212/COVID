@@ -13,12 +13,11 @@ Multi-scale time series anomaly detection framework supporting COVID-19 outbreak
 ## Project Structure
 
 ```
-├── model/              # Model implementations (Transformer encoder, prediction heads)
-├── utils/              # Utility functions (data loading, sequence creation, mapping)
-├── pipeline/           # Data pipeline
-├── scripts/            # Training and evaluation scripts
-│   ├── run_baselines.py    # Run baseline models
-│   └── run_ablation.sh     # Run ablation studies
+├── model/              # Core model and causal scoring logic
+├── utils/              # Shared utilities (I/O, causal eval, sequence tools)
+├── experiments/        # Dataset-specific utilities and side branches
+├── data/processing/    # Dataset processing scripts
+├── scripts/            # Main training and evaluation entrypoints
 └── notebooks/          # Analysis notebooks with results
 ```
 
@@ -30,38 +29,50 @@ pip install -r requirements.txt
 ```
 
 2. Prepare data:
-   - Place data files in `data/` directory
-   - Processed data files should be in `data/processed/`
+   - Place raw data files under `data/`
+   - Run processing scripts in `data/processing/` to generate `.pt` bundles
 
 3. Run experiments:
 
-### COVID-19 Dataset:
+### Stage-1 training:
 ```bash
-# Ablation study on 6-feature dataset
-bash scripts/run_ablation.sh 6feat all
-
-# Run baseline models
-python scripts/run_baselines.py --data_path data/processed/week_21feat.pt --models baselines
+python scripts/train_stage1.py \
+  --data_dir data/SWaT/processed \
+  --coarse_file swat_coarse.pt \
+  --fine_file swat_fine.pt \
+  --model_save_path models/swat_stage1.pt
 ```
 
-### PSM Dataset:
+### Causal stability evaluation:
 ```bash
-# Process PSM data into fine/coarse scales
-python scripts/process_psm.py --data_dir data/PSM/PSM --output_dir data/PSM/processed --k 5
+python scripts/verify_causal_stability.py \
+  --model_path models/swat_stage1.pt \
+  --data_dir data/SWaT/processed \
+  --data_file data/SWaT/processed/swat_fine.pt \
+  --scale fine \
+  --global_threshold_percentile 10
+```
 
-# Train coarse-only baseline (sanity check)
-python scripts/train_psm_stage1.py --data_dir data/PSM/processed --epochs 50 --batch_size 64
-
-# Train multi-scale model
-python scripts/train_psm_multiscale.py --data_dir data/PSM/processed --epochs 50 --batch_size 64 --use_lu --lambda_u 1.0
+### Fusion sweep:
+```bash
+python scripts/sweep_causal_fusion.py \
+  --model_path models/swat_stage1.pt \
+  --data_dir data/SWaT/processed \
+  --data_file data/SWaT/processed/swat_fine.pt \
+  --scale fine \
+  --global_threshold_percentile 10 \
+  --fusion_normalize --struct_metric relative \
+  --fusion_mode relu_gate \
+  --sweep_relu \
+  --relu_tau_percentile 90 \
+  --lambda_start 0 --lambda_end 1 --lambda_step 0.1 \
+  --save_dir analysis
 ```
 
 ## Results
 
-Experimental results are documented in `notebooks/results.ipynb`, including:
-- Ablation studies on multi-scale design and L_u constraint
-- Baseline model comparisons
-- Performance metrics (F1, AUPRC, ROC-AUC) on 6-feature and 21-feature datasets
+Experimental results are documented in `notebooks/`, including:
+- Performance metrics (F1, AUPRC, ROC-AUC)
 
 ## Data & Models
 
@@ -76,7 +87,7 @@ Experimental results are documented in `notebooks/results.ipynb`, including:
 - **Fine scale**: Original sequences (1-step, e.g., per minute)
 - **Coarse scale**: Aggregated sequences (k fine steps → 1 coarse step, default k=5)
 - **Mapping**: `coarse_t ↔ fine_[t*k : (t+1)*k]` (explicit index mapping)
-- Processing script: `scripts/process_psm.py`
+- Processing script: `data/processing/process_psm.py`
 
 ## Citation
 

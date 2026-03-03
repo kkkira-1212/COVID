@@ -46,3 +46,20 @@ def add_mapping(bundle_fine, bundle_coarse):
     mapping = compute_fine_coarse_mapping(bundle_fine, bundle_coarse)
     bundle_fine['fine_to_coarse_index'] = mapping
     return bundle_fine
+
+
+def build_batch_mapping(batch_idx_fine, mapping):
+    mapping_batch = mapping[batch_idx_fine]
+    valid_mask = (mapping_batch >= 0)
+    if valid_mask.sum() == 0:
+        return mapping_batch, valid_mask, None, None, {}
+    coarse_indices = mapping_batch[valid_mask]
+    unique_coarse_indices = coarse_indices.unique()
+    fine_to_coarse_map = {}
+    fine_indices = batch_idx_fine[valid_mask]
+    for i, coarse_idx in enumerate(coarse_indices):
+        key = coarse_idx.item()
+        if key not in fine_to_coarse_map:
+            fine_to_coarse_map[key] = []
+        fine_to_coarse_map[key].append(fine_indices[i])
+    return mapping_batch, valid_mask, coarse_indices, unique_coarse_indices, fine_to_coarse_map
