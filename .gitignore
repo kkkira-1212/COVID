@@ -46,6 +46,7 @@ logs/
 # Generated output files (temporary)
 *.png
 !graph/*.png  # Keep graph folder images but ignore root-level generated images
+!assets/*.png
 sequences_*.pt
 
 # Temporary test files

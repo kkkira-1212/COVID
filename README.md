@@ -1,14 +1,19 @@
 # Multi-Scale Time Series Anomaly Detection
 
-Multi-scale time series anomaly detection framework supporting COVID-19 outbreak prediction and PSM anomaly detection.
+## Abstract
+
+The operational integrity of complex industrial systems relies on precise anomaly detection and diagnosis. The vast majority of existing methods narrowly focus on capturing temporal similarities of representations, often overlooking the disruption of internal causal relationships, which characterizes system failures and latent anomalies. In this paper, we propose a novel framework (CAAD) that reframes anomaly detection as the continuous verification of Granger causality consistency through exogenous variables. Specifically, the CAAD framework models exogenous time-series variables as residuals, identifying anomalies as significant deviations caused by external interventions. The proposed framework leverages multi-scale alignment to internalize system dynamics and utilizes a gradient-based matrix to monitor internal causal relationship breakdowns. By quantifying causal deviations of both dynamic evolution and relational topology, the CAAD is able to capture subtle causal shifts to achieve precise anomaly detection. Extensive experiments on real-world industrial datasets demonstrate that the CAAD achieves high-precision anomaly detection, outperforming most state-of-the-art baselines.
+
+## Framework
+
+![CAAD Framework](assets/caad_framework.png)
 
 ## Features
 
-- **Multi-scale architecture**: Leverages fine and coarse temporal scales (e.g., daily/weekly for COVID-19, fine/coarse aggregation for PSM)
-- **L_u constraint loss**: Aligns residuals between fine and coarse scale predictions
-- **Comprehensive baselines**: PatchTST, DLinear, LSTM, AERCA
-- **Ablation studies**: Systematic evaluation of design components
-- **PSM dataset support**: Fine/coarse scale processing with explicit mapping (coarse_t ↔ fine_[t*k : (t+1)*k])
+- **CAAD framework**: Causal deviation tracking with gradient-based causal matrices
+- **Multi-scale alignment**: Joint modeling of fine/coarse dynamics
+- **Temporal deviation**: MAD-normalized residual scoring with top-k aggregation
+- **Causal fusion**: Structural and temporal scores with configurable fusion
 
 ## Project Structure
 
@@ -18,7 +23,7 @@ Multi-scale time series anomaly detection framework supporting COVID-19 outbreak
 ├── experiments/        # Dataset-specific utilities and side branches
 ├── data/processing/    # Dataset processing scripts
 ├── scripts/            # Main training and evaluation entrypoints
-└── notebooks/          # Analysis notebooks with results
+└── data/               # Raw and processed datasets (gitignored)
 ```
 
 ## Quick Start
@@ -69,25 +74,11 @@ python scripts/sweep_causal_fusion.py \
   --save_dir analysis
 ```
 
-## Results
-
-Experimental results are documented in `notebooks/`, including:
-- Performance metrics (F1, AUPRC, ROC-AUC)
-
 ## Data & Models
 
-- **Data files** are not included due to size constraints. Please prepare data separately:
-  - COVID-19: Place Excel files in `data/` directory
-  - PSM: Place CSV files (`train.csv`, `test.csv`, `test_label.csv`) in `data/PSM/PSM/`
-- **Trained models** are not included. Models can be trained using the provided scripts.
-- **Processed data** (`.pt` files) are excluded from git but can be generated using processing scripts.
-
-## PSM Dataset Details
-
-- **Fine scale**: Original sequences (1-step, e.g., per minute)
-- **Coarse scale**: Aggregated sequences (k fine steps → 1 coarse step, default k=5)
-- **Mapping**: `coarse_t ↔ fine_[t*k : (t+1)*k]` (explicit index mapping)
-- Processing script: `data/processing/process_psm.py`
+- **Data files** are not included due to size constraints. Place raw data under `data/` and generate `.pt` bundles with `data/processing/`.
+- **Trained models** are not included. Train models using the provided scripts.
+- **Processed data** (`.pt`) are excluded from git and should be generated locally.
 
 ## Citation
 
