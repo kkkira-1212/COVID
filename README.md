@@ -13,6 +13,7 @@ The operational integrity of complex industrial systems relies on precise anomal
 - **CAAD framework**: Causal deviation tracking with gradient-based causal matrices
 - **Multi-scale alignment**: Joint modeling of fine/coarse dynamics
 - **Temporal deviation**: MAD-normalized residual scoring with top-k aggregation
+- **Structural deviation**: Gradient-based causal matrix deviation to capture relational topology shifts.
 - **Causal fusion**: Structural and temporal scores with configurable fusion
 
 ## Project Structure
