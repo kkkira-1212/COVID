@@ -1,6 +1,4 @@
-# CAAD: Causality-Aware Multivariate Time Series Anomaly
-Detection via Multi-Scale Alignment and Structural Causal
-Consistency
+# CAAD: Causality-Aware Multivariate Time Series Anomaly Detection via Multi-Scale Alignment and Structural Causal Consistency
 
 ## Abstract
 
